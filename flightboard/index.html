@@ -90,7 +90,7 @@
       <button id="fsBtn" type="button">Fullscreen</button>
       <button id="closeBtn" type="button" class="primary">Done</button>
     </div>
-    <p class="foot">Live positions from airplanes.live (backups: adsb.fi, adsb.lol), routes and aircraft from adsbdb. Only aircraft broadcasting ADS-B appear, and routes can occasionally be out of date. Keys: F fullscreen, S settings.</p>
+    <p class="foot">Live positions from free ADS-B networks (adsb.fi via public relays, with OpenSky as a slower backup), routes and aircraft from adsbdb. Your location is rounded to about 1 km before it is sent. Only aircraft broadcasting ADS-B appear, and routes can occasionally be out of date. Keys: F fullscreen, S settings.</p>
   </div>
 </div>
 
@@ -382,6 +382,7 @@ function idleSub(now) {
     const d = im ? Math.round(nearestOut.dist * 1.15078) + ' mi' : Math.round(nearestOut.dist * 1.852) + ' km';
     return `Nearest: ${nearestOut.callsign || nearestOut.reg || 'aircraft'} ${d} away`;
   }
+  if (slowSource() && Math.floor(now / 6000) % 3 === 2) return 'Using OpenSky - updates every 75s';
   const r = im ? `${settings.radiusMi} mi` : `${Math.round(settings.radiusMi * 1.609)} km`;
   return `Watching ${r} around ${loc.label || loc.lat.toFixed(2) + ', ' + loc.lon.toFixed(2)}`;
 }
@@ -430,12 +431,30 @@ function nm(lat1, lon1, lat2, lon2) {
   const a = Math.sin(dLa / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLo / 2) ** 2;
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
+const ADSBFI = (la, lo, r) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${r}`;
+// Tried in order on each refresh. The plane-position services don't allow direct browser calls,
+// so free public relays and OpenSky (slower, 400 requests/day without an account) are fallbacks.
 const SOURCES = [
-  { name: 'airplanes.live', url: (la, lo, r) => `https://api.airplanes.live/v2/point/${la}/${lo}/${r}` },
-  { name: 'adsb.fi', url: (la, lo, r) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${r}` },
-  { name: 'adsb.lol', url: (la, lo, r) => `https://api.adsb.lol/v2/point/${la}/${lo}/${r}` },
+  { name: 'airplanes.live', kind: 'readsb', url: (la, lo, r) => `https://api.airplanes.live/v2/point/${la}/${lo}/${r}` },
+  { name: 'adsb.lol', kind: 'readsb', url: (la, lo, r) => `https://api.adsb.lol/v2/point/${la}/${lo}/${r}` },
+  { name: 'adsb.fi', kind: 'readsb', url: ADSBFI },
+  { name: 'relay 1', kind: 'readsb', url: (la, lo, r) => 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(ADSBFI(la, lo, r)) },
+  { name: 'relay 2', kind: 'readsb', url: (la, lo, r) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(ADSBFI(la, lo, r)) },
+  { name: 'OpenSky', kind: 'opensky', url: (la, lo, r) => {
+      const dLa = r / 60, dLo = r / 60 / Math.max(0.2, Math.cos(la * Math.PI / 180)), f = v => v.toFixed(2);
+      return `https://opensky-network.org/api/states/all?lamin=${f(la - dLa)}&lomin=${f(lo - dLo)}&lamax=${f(la + dLa)}&lomax=${f(lo + dLo)}`;
+    } },
 ];
-let srcIdx = 0, failCount = 0, missCount = 0, switching = false, srcErrors = [];
+const skipUntil = {};
+let activeSource = null;
+function fromOpenSky(j) {
+  return (j.states || []).map(s => ({
+    hex: s[0], flight: s[1] || '', lon: s[5], lat: s[6],
+    alt_baro: s[8] ? 'ground' : (s[7] != null ? s[7] * 3.28084 : null), alt_geom: s[13] != null ? s[13] * 3.28084 : undefined,
+    gs: s[9] != null ? s[9] * 1.94384 : undefined, track: s[10], baro_rate: s[11] != null ? s[11] * 196.85 : undefined,
+  }));
+}
+let failCount = 0, missCount = 0, switching = false, srcErrors = [];
 function normalize(a) {
   const lat = a.lat != null ? a.lat : a.lastPosition && a.lastPosition.lat;
   const lon = a.lon != null ? a.lon : a.lastPosition && a.lastPosition.lon;
@@ -490,26 +509,44 @@ async function enrich(p) {
   if (ac) { if (!p.reg && ac.reg) p.reg = ac.reg; if (!p.owner) p.owner = ac.owner || ''; p.ownerCountry = ac.ownerCountry || ''; }
   p.typeName = typeNameOf(p.type, p.desc, ac);
 }
-function mergeLive(cur, n) { for (const k of ['alt', 'gs', 'track', 'vr', 'lat', 'lon', 'dist']) if (n[k] != null) cur[k] = n[k]; }
+function mergeLive(cur, n) { for (const k of ['alt', 'gs', 'track', 'vr', 'lat', 'lon', 'dist']) if (n[k] != null) cur[k] = n[k]; markFix(cur); }
+function markFix(p) { p.fix = { lat: p.lat, lon: p.lon, alt: p.alt, t: Date.now() }; }
+// Between refreshes, move the plane along its heading so distance and altitude keep ticking.
+setInterval(() => {
+  const p = state.plane; if (!p || !p.fix || DEMO || typeof p.gs !== 'number' || typeof p.track !== 'number' || p.fix.lat == null) return;
+  const dt = Math.min(120, (Date.now() - p.fix.t) / 1000), d = p.gs * dt / 3600, th = p.track * Math.PI / 180;
+  p.lat = p.fix.lat + d * Math.cos(th) / 60;
+  p.lon = p.fix.lon + d * Math.sin(th) / 60 / Math.max(0.2, Math.cos(p.fix.lat * Math.PI / 180));
+  if (typeof p.fix.alt === 'number' && typeof p.vr === 'number') p.alt = Math.max(0, p.fix.alt + p.vr * dt / 60);
+  if (loc) p.dist = nm(loc.lat, loc.lon, p.lat, p.lon);
+}, 1000);
 
 async function poll(g) {
   if (!loc) return;
   const rad = settings.radiusMi / 1.15078;
   const qr = Math.min(100, Math.max(15, Math.ceil(rad * 2.5)));
-  const la = loc.lat.toFixed(4), lo = loc.lon.toFixed(4);
-  let data = null; const errs = [];
-  for (let k = 0; k < SOURCES.length && !data; k++) {
-    const i = (srcIdx + k) % SOURCES.length;
-    try { data = await fetchJSON(SOURCES[i].url(la, lo, qr), 8000); srcIdx = i; } catch (e) {
-      console.warn(SOURCES[i].name, e.message || e);
-      errs.push(SOURCES[i].name + ': ' + (e.status ? 'HTTP ' + e.status : e.name === 'AbortError' ? 'timed out' : 'blocked'));
+  // Rounded to ~1 km: enough for a 10-mile search, and keeps your exact location private.
+  const la = +loc.lat.toFixed(2), lo = +loc.lon.toFixed(2);
+  let list = null; const errs = [];
+  for (const s of SOURCES) {
+    if ((skipUntil[s.name] || 0) > Date.now()) continue;
+    try {
+      const j = await fetchJSON(s.url(la, lo, qr), s.kind === 'opensky' ? 12000 : 8000);
+      const l = s.kind === 'opensky' ? fromOpenSky(j) : (j.ac || j.aircraft);
+      if (!Array.isArray(l)) { const e = new Error('bad reply'); e.bad = true; throw e; }
+      list = l; activeSource = s; break;
+    } catch (e) {
+      console.warn(s.name, e.message || e);
+      const why = e.status ? 'HTTP ' + e.status : e.name === 'AbortError' ? 'timed out' : (e.bad || e.name === 'SyntaxError') ? 'bad reply' : 'blocked';
+      errs.push(s.name + ': ' + why);
+      skipUntil[s.name] = Date.now() + (e.status === 429 ? (s.kind === 'opensky' ? 3600e3 : 60e3) : why === 'blocked' ? 600e3 : why === 'timed out' ? 30e3 : 120e3);
     }
   }
   srcErrors = errs;
   if (g !== gen) return;
-  if (!data) { failCount++; if (state.mode === 'idle' || failCount >= 3) showIdle('Flight data unavailable - retrying'); return; }
+  if (!list) { activeSource = null; failCount++; if (state.mode === 'idle' || failCount >= 3) showIdle('Flight data unavailable - retrying'); return; }
   failCount = 0;
-  const air = (data.ac || data.aircraft || []).map(normalize).filter(p => p && p.alt !== 'ground').sort((a, b) => a.dist - b.dist);
+  const air = list.map(normalize).filter(p => p && p.alt !== 'ground').sort((a, b) => a.dist - b.dist);
   const inR = air.filter(p => p.dist <= rad);
   nearestOut = air.find(p => p.dist > rad) || null; nearCount = inR.length;
   let target = inR[0] || null;
@@ -517,7 +554,7 @@ async function poll(g) {
   if (cur) {
     const still = inR.find(p => p.hex === cur.hex);
     if (still) { mergeLive(cur, still); missCount = 0; if (target.hex !== cur.hex && (Date.now() - state.born < 15000 || cur.dist - target.dist < 0.8)) target = cur; }
-    else if (!target) { if (++missCount >= 2) showIdle('No flights overhead'); return; }
+    else if (!target) { if (++missCount >= (slowSource() ? 1 : 2)) showIdle('No flights overhead'); return; }
   }
   if (!target) { showIdle('No flights overhead'); return; }
   if (cur && target.hex === cur.hex) return;
@@ -526,15 +563,17 @@ async function poll(g) {
   try { await enrich(target); } finally { switching = false; }
   if (g !== gen) return;
   missCount = 0;
+  markFix(target);
   showPlane(target);
 }
+const slowSource = () => !!activeSource && activeSource.kind === 'opensky';
 let gen = 0, pollTimer = null;
 function startPolling() {
   clearTimeout(pollTimer); const g = ++gen;
   const loop = async () => {
     if (g !== gen) return;
     if (!document.hidden) { try { await poll(g); } catch (e) { console.warn(e); } }
-    if (g === gen) pollTimer = setTimeout(loop, 5000);
+    if (g === gen) pollTimer = setTimeout(loop, !activeSource ? 15000 : slowSource() ? 75000 : 6000);
   };
   if (state.mode === 'idle') setStatus('Scanning the sky');
   loop();
