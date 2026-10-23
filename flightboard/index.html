@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Overhead Board</title>
 <meta name="description" content="Live airport-style LED board showing the flight directly above you.">
 <meta name="theme-color" content="#000000">
@@ -51,6 +51,7 @@
   #results { display:flex; flex-direction:column; gap:6px; }
   #results .result { text-align:left; }
   #results .msg { color:var(--muted); font-size:13px; }
+  .status { white-space:pre-line; font-size:12px; color:var(--muted); }
   .foot { margin:14px 0 0; font-size:12px; color:var(--muted); }
   .foot a { color:var(--muted); }
 </style>
@@ -83,14 +84,18 @@
         <option value="white">White</option><option value="amber">Amber</option><option value="green">Green</option><option value="blue">Ice blue</option>
       </select></label>
       <label>Layout<select id="layout">
-        <option value="auto">Auto</option><option value="landscape">Wide</option><option value="portrait">Tall</option>
+        <option value="auto">Auto (fill screen)</option><option value="big">Large</option><option value="landscape">Wide strip</option><option value="portrait">Tall</option>
       </select></label>
+    </section>
+    <section>
+      <div class="lab">Flight data</div>
+      <div id="dataStatus" class="status">Not checked yet</div>
     </section>
     <div class="row end">
       <button id="fsBtn" type="button">Fullscreen</button>
       <button id="closeBtn" type="button" class="primary">Done</button>
     </div>
-    <p class="foot">Live positions from free ADS-B networks (adsb.fi via public relays, with OpenSky as a slower backup), routes and aircraft from adsbdb. Your location is rounded to about 1 km before it is sent. Only aircraft broadcasting ADS-B appear, and routes can occasionally be out of date. Keys: F fullscreen, S settings.</p>
+    <p class="foot">Live positions from free ADS-B networks (adsb.fi, adsb.lol, airplanes.live), reached directly or through free public relays; routes and aircraft from adsbdb. Your location is rounded to about 1 km before it is sent. Only aircraft broadcasting ADS-B appear, and routes can occasionally be out of date. Keys: F fullscreen, S settings.</p>
   </div>
 </div>
 
@@ -190,8 +195,9 @@ function apName(n) {
 /* ---------- board rendering ---------- */
 const cvs = document.getElementById('board');
 const ctx = cvs.getContext('2d');
-const LAYOUTS = { land: { cols: 256, rows: 64, portrait: false }, port: { cols: 128, rows: 132, portrait: true } };
-let L = LAYOUTS.land, COLS = 256, ROWS = 64;
+// Content boxes; the dot grid itself is stretched to fill the whole screen around them.
+const LAYOUTS = { classic: { cw: 256, ch: 64, kind: 'classic' }, big: { cw: 236, ch: 98, kind: 'big' }, tall: { cw: 128, ch: 132, kind: 'tall' } };
+let L = LAYOUTS.classic, COLS = 256, ROWS = 64, OX = 0, OY = 0;
 let buf = new Uint16Array(COLS * ROWS), prev = new Uint16Array(COLS * ROWS);
 const geo = { pitch: 1, ox: 0, oy: 0 };
 let bg = null, sprites = [], forcePaint = true;
@@ -210,23 +216,20 @@ function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
   const w = window.innerWidth, h = window.innerHeight;
   cvs.width = Math.round(w * dpr); cvs.height = Math.round(h * dpr);
-  const portrait = settings.layout === 'portrait' || (settings.layout === 'auto' && h > w * 1.1);
-  L = portrait ? LAYOUTS.port : LAYOUTS.land;
-  COLS = L.cols; ROWS = L.rows;
+  const a = w / h, pick = settings.layout;
+  L = pick === 'landscape' ? LAYOUTS.classic : pick === 'big' ? LAYOUTS.big : pick === 'portrait' ? LAYOUTS.tall
+    : a >= 3 ? LAYOUTS.classic : a >= 1.15 ? LAYOUTS.big : LAYOUTS.tall;
+  const pitch = Math.min(cvs.width / (L.cw + 4), cvs.height / (L.ch + 4));
+  COLS = Math.floor(cvs.width / pitch); ROWS = Math.floor(cvs.height / pitch);
+  OX = Math.floor((COLS - L.cw) / 2); OY = Math.floor((ROWS - L.ch) / 2);
   buf = new Uint16Array(COLS * ROWS); prev = new Uint16Array(COLS * ROWS);
-  const m = 0.035;
-  geo.pitch = Math.min(cvs.width * (1 - 2 * m) / COLS, cvs.height * (1 - 2 * m) / ROWS);
-  geo.ox = (cvs.width - geo.pitch * COLS) / 2;
-  geo.oy = (cvs.height - geo.pitch * ROWS) / 2;
+  geo.pitch = pitch; geo.ox = (cvs.width - pitch * COLS) / 2; geo.oy = (cvs.height - pitch * ROWS) / 2;
   sprites = []; buildBg(); forcePaint = true;
 }
 function buildBg() {
   bg = document.createElement('canvas'); bg.width = cvs.width; bg.height = cvs.height;
   const b = bg.getContext('2d'), p = geo.pitch;
   b.fillStyle = '#000'; b.fillRect(0, 0, bg.width, bg.height);
-  const pad = p * 1.6, x = geo.ox - pad, y = geo.oy - pad, w = p * COLS + pad * 2, h = p * ROWS + pad * 2, r = p * 1.4;
-  b.beginPath(); b.moveTo(x + r, y); b.arcTo(x + w, y, x + w, y + h, r); b.arcTo(x + w, y + h, x, y + h, r); b.arcTo(x, y + h, x, y, r); b.arcTo(x, y, x + w, y, r); b.closePath();
-  b.fillStyle = '#060606'; b.fill(); b.lineWidth = Math.max(1, p * 0.45); b.strokeStyle = '#1d1d1d'; b.stroke();
   b.fillStyle = '#191919'; b.beginPath();
   const rad = p * 0.33;
   for (let j = 0; j < ROWS; j++) for (let i = 0; i < COLS; i++) {
@@ -260,7 +263,7 @@ function paint() {
 function rnd(a, b) { let h = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(b + 0x7f4a7c15, 0xc2b2ae35); h = Math.imul(h ^ (h >>> 13), 0x27d4eb2f); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; }
 const SCRAMBLE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
-function setDot(x, y, c, cl, cr) { if (x < cl || x >= cr || x < 0 || x >= COLS || y < 0 || y >= ROWS) return; buf[y * COLS + x] = c; }
+function setDot(x, y, c, cl, cr) { if (x < cl || x >= cr) return; x += OX; y += OY; if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return; buf[y * COLS + x] = c; }
 function blit(f, rows, x, y, sc, c, cl, cr) {
   for (let r = 0; r < f.h; r++) {
     const bits = rows[r]; if (!bits) continue;
@@ -271,7 +274,7 @@ function blit(f, rows, x, y, sc, c, cl, cr) {
 function drawText(it, now) {
   const f = it.font || F6, sc = it.scale || 1, cw = f.w * sc;
   const chars = Array.from(it.str || ''); const tw = chars.length * cw;
-  const W = it.w != null ? it.w : COLS - it.x;
+  const W = it.w != null ? it.w : L.cw - it.x;
   let cl, cr, x0;
   if (it.align === 'right') { cl = it.x - W; cr = it.x; x0 = it.x - tw; }
   else if (it.align === 'center') { cl = Math.round(it.x - W / 2); cr = cl + W; x0 = Math.round(it.x - tw / 2); }
@@ -304,7 +307,7 @@ function drawShape(it, now) {
   for (let dy = 0; dy < it.h; dy++) for (let dx = 0; dx < it.w; dx++) {
     const c = it.fn((dx + 0.5) / it.w, (dy + 0.5) / it.h, dx, dy); if (!c) continue;
     if (it.dissolve !== false && age < 900 && age < rnd(dx, dy * 131) * 900) continue;
-    setDot(it.x + dx, it.y + dy, c, 0, COLS);
+    setDot(it.x + dx, it.y + dy, c, -1e9, 1e9);
   }
 }
 
@@ -360,7 +363,14 @@ function flightItems(now) {
   const p = state.plane, born = state.born, T = textColor(), D = dimColor();
   const lines = p.lines || linesOf(p), st = stats(p), items = [];
   const txt = (x, y, w, str, color, seed, extra) => items.push(Object.assign({ kind: 'text', x, y, w, str, color, born, seed }, extra));
-  if (!L.portrait) {
+  if (L.kind === 'big') {
+    items.push(logoItem(p, 2, 2, 33, 33, born));
+    txt(40, 2, 194, lines[0], T, 1); txt(40, 14, 194, lines[1], T, 2); txt(40, 26, 194, lines[2], T, 3);
+    txt(2, 40, 232, lines[3], T, 4); txt(2, 52, 232, lines[4], T, 5);
+    items.push({ kind: 'shape', x: 2, y: 66, w: 232, h: 1, born, dissolve: false, fn: (u, v, dx) => dx % 2 ? 0 : D });
+    const cells = st.map(([l, v]) => [l.replace(':', ''), v]).concat([['Now', clockStr()]]);
+    cells.forEach(([lab, val], i) => { const x = 2 + (i % 3) * 78, y = 72 + Math.floor(i / 3) * 14; txt(x, y, 18, lab, D, 10 + i); txt(x + 72, y, 48, val, T, 20 + i, { align: 'right' }); });
+  } else if (L.kind === 'classic') {
     items.push(logoItem(p, 2, 2, 33, 33, born));
     txt(40, 2, 130, lines[0], T, 1); txt(40, 14, 130, lines[1], T, 2); txt(40, 26, 130, lines[2], T, 3);
     txt(2, 38, 168, lines[3], T, 4); txt(2, 50, 168, lines[4], T, 5);
@@ -374,29 +384,29 @@ function flightItems(now) {
   }
   return items;
 }
+function clockStr() { return new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).replace(/\s/g, ''); }
 function idleSub(now) {
   const im = imperial();
   if (!loc) return 'Tap the gear to set a location';
-  if (state.status.startsWith('Flight data') && srcErrors.length) return srcErrors.join('  ');
+  if (state.status.startsWith('Flight data')) return `No data route worked (${ROUTES.length} tried) - tap gear for details`;
   if (nearestOut && Math.floor(now / 6000) % 2) {
     const d = im ? Math.round(nearestOut.dist * 1.15078) + ' mi' : Math.round(nearestOut.dist * 1.852) + ' km';
     return `Nearest: ${nearestOut.callsign || nearestOut.reg || 'aircraft'} ${d} away`;
   }
-  if (slowSource() && Math.floor(now / 6000) % 3 === 2) return 'Using OpenSky - updates every 75s';
   const r = im ? `${settings.radiusMi} mi` : `${Math.round(settings.radiusMi * 1.609)} km`;
   return `Watching ${r} around ${loc.label || loc.lat.toFixed(2) + ', ' + loc.lon.toFixed(2)}`;
 }
 function idleItems(now) {
-  const T = textColor(), D = dimColor(), cx = COLS / 2, d = new Date();
+  const T = textColor(), D = dimColor(), cx = L.cw / 2, d = new Date(), W = L.cw - 4;
   let time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   if (d.getSeconds() % 2) time = time.replace(':', ' ');
   const date = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase();
-  const top = L.portrait ? Math.round(ROWS / 2) - 30 : 5;
+  const top = L.kind === 'classic' ? 5 : Math.round(L.ch / 2) - 30;
   return [
-    { kind: 'text', x: cx, y: top, w: COLS - 4, align: 'center', str: time, color: T, scale: 2, scramble: false },
-    { kind: 'text', x: cx, y: top + 24, w: COLS - 4, align: 'center', str: date, color: D, scramble: false },
-    { kind: 'text', x: cx, y: top + 37, w: COLS - 4, align: 'center', str: state.status, color: T, born: state.statusBorn, seed: 3 },
-    { kind: 'text', x: cx, y: top + 50, w: COLS - 4, align: 'center', str: idleSub(now), color: D, font: F5, scramble: false, born: state.statusBorn },
+    { kind: 'text', x: cx, y: top, w: W, align: 'center', str: time, color: T, scale: 2, scramble: false },
+    { kind: 'text', x: cx, y: top + 24, w: W, align: 'center', str: date, color: D, scramble: false },
+    { kind: 'text', x: cx, y: top + 37, w: W, align: 'center', str: state.status, color: T, born: state.statusBorn, seed: 3 },
+    { kind: 'text', x: cx, y: top + 50, w: W, align: 'center', str: idleSub(now), color: D, font: F5, scramble: false, born: state.statusBorn },
   ];
 }
 let lastFrame = 0;
@@ -431,28 +441,42 @@ function nm(lat1, lon1, lat2, lon2) {
   const a = Math.sin(dLa / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLo / 2) ** 2;
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
-const ADSBFI = (la, lo, r) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${r}`;
-// Tried in order on each refresh. The plane-position services don't allow direct browser calls,
-// so free public relays and OpenSky (slower, 400 requests/day without an account) are fallbacks.
-const SOURCES = [
-  { name: 'airplanes.live', kind: 'readsb', url: (la, lo, r) => `https://api.airplanes.live/v2/point/${la}/${lo}/${r}` },
-  { name: 'adsb.lol', kind: 'readsb', url: (la, lo, r) => `https://api.adsb.lol/v2/point/${la}/${lo}/${r}` },
-  { name: 'adsb.fi', kind: 'readsb', url: ADSBFI },
-  { name: 'relay 1', kind: 'readsb', url: (la, lo, r) => 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(ADSBFI(la, lo, r)) },
-  { name: 'relay 2', kind: 'readsb', url: (la, lo, r) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(ADSBFI(la, lo, r)) },
-  { name: 'OpenSky', kind: 'opensky', url: (la, lo, r) => {
-      const dLa = r / 60, dLo = r / 60 / Math.max(0.2, Math.cos(la * Math.PI / 180)), f = v => v.toFixed(2);
-      return `https://opensky-network.org/api/states/all?lamin=${f(la - dLa)}&lomin=${f(lo - dLo)}&lamax=${f(la + dLa)}&lomax=${f(lo + dLo)}`;
-    } },
+// The plane-position services (and OpenSky) don't allow direct browser calls, so the board also tries
+// several free public relays. All routes are probed at once; the first that works is remembered.
+const TARGETS = {
+  fi: (la, lo, r) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${r}`,
+  lol: (la, lo, r) => `https://api.adsb.lol/v2/point/${la}/${lo}/${r}`,
+};
+const RELAYS = {
+  codetabs: u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
+  allorigins: u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+  'cors.lol': u => 'https://api.cors.lol/?url=' + encodeURIComponent(u),
+  corsproxy: u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+};
+const ROUTES = [
+  { id: 'airplanes.live', url: (la, lo, r) => `https://api.airplanes.live/v2/point/${la}/${lo}/${r}` },
+  { id: 'adsb.lol', url: TARGETS.lol },
+  { id: 'adsb.fi', url: TARGETS.fi },
 ];
-const skipUntil = {};
-let activeSource = null;
-function fromOpenSky(j) {
-  return (j.states || []).map(s => ({
-    hex: s[0], flight: s[1] || '', lon: s[5], lat: s[6],
-    alt_baro: s[8] ? 'ground' : (s[7] != null ? s[7] * 3.28084 : null), alt_geom: s[13] != null ? s[13] * 3.28084 : undefined,
-    gs: s[9] != null ? s[9] * 1.94384 : undefined, track: s[10], baro_rate: s[11] != null ? s[11] * 196.85 : undefined,
-  }));
+for (const rn in RELAYS) for (const tn of ['fi', 'lol']) ROUTES.push({ id: `${rn} > adsb.${tn}`, url: (la, lo, r) => RELAYS[rn](TARGETS[tn](la, lo, r)) });
+let activeSource = null, goodRoute = store.get('route', null);
+const routeStatus = {};
+async function tryRoute(rt, la, lo, qr) {
+  try {
+    const j = await fetchJSON(rt.url(la, lo, qr), 9000);
+    const l = j && (j.ac || j.aircraft);
+    if (!Array.isArray(l)) { const e = new Error('bad reply'); e.bad = true; throw e; }
+    routeStatus[rt.id] = 'works'; return l;
+  } catch (e) {
+    routeStatus[rt.id] = e.status ? 'HTTP ' + e.status : e.name === 'AbortError' ? 'timed out' : (e.bad || e.name === 'SyntaxError') ? 'bad reply' : 'blocked';
+    throw e;
+  }
+}
+function updateDataStatus() {
+  const el = document.getElementById('dataStatus'); if (!el) return;
+  const lines = [activeSource ? 'Using: ' + activeSource.id : 'No working route yet'];
+  for (const r of ROUTES) lines.push((routeStatus[r.id] === 'works' ? 'OK  ' : '--  ') + r.id + ': ' + (routeStatus[r.id] || 'not tried'));
+  el.textContent = lines.join('\n');
 }
 let failCount = 0, missCount = 0, switching = false, srcErrors = [];
 function normalize(a) {
@@ -527,22 +551,15 @@ async function poll(g) {
   const qr = Math.min(100, Math.max(15, Math.ceil(rad * 2.5)));
   // Rounded to ~1 km: enough for a 10-mile search, and keeps your exact location private.
   const la = +loc.lat.toFixed(2), lo = +loc.lon.toFixed(2);
-  let list = null; const errs = [];
-  for (const s of SOURCES) {
-    if ((skipUntil[s.name] || 0) > Date.now()) continue;
-    try {
-      const j = await fetchJSON(s.url(la, lo, qr), s.kind === 'opensky' ? 12000 : 8000);
-      const l = s.kind === 'opensky' ? fromOpenSky(j) : (j.ac || j.aircraft);
-      if (!Array.isArray(l)) { const e = new Error('bad reply'); e.bad = true; throw e; }
-      list = l; activeSource = s; break;
-    } catch (e) {
-      console.warn(s.name, e.message || e);
-      const why = e.status ? 'HTTP ' + e.status : e.name === 'AbortError' ? 'timed out' : (e.bad || e.name === 'SyntaxError') ? 'bad reply' : 'blocked';
-      errs.push(s.name + ': ' + why);
-      skipUntil[s.name] = Date.now() + (e.status === 429 ? (s.kind === 'opensky' ? 3600e3 : 60e3) : why === 'blocked' ? 600e3 : why === 'timed out' ? 30e3 : 120e3);
-    }
+  let list = null;
+  const known = goodRoute && ROUTES.find(r => r.id === goodRoute);
+  if (known) { try { list = await tryRoute(known, la, lo, qr); activeSource = known; } catch (e) { goodRoute = null; } }
+  if (!list) {
+    const res = await Promise.all(ROUTES.map(rt => tryRoute(rt, la, lo, qr).then(l => ({ rt, l }), () => null)));
+    const hit = res.find(Boolean);
+    if (hit) { list = hit.l; activeSource = hit.rt; goodRoute = hit.rt.id; store.set('route', goodRoute); }
   }
-  srcErrors = errs;
+  updateDataStatus();
   if (g !== gen) return;
   if (!list) { activeSource = null; failCount++; if (state.mode === 'idle' || failCount >= 3) showIdle('Flight data unavailable - retrying'); return; }
   failCount = 0;
@@ -566,7 +583,7 @@ async function poll(g) {
   markFix(target);
   showPlane(target);
 }
-const slowSource = () => !!activeSource && activeSource.kind === 'opensky';
+const slowSource = () => false;
 let gen = 0, pollTimer = null;
 function startPolling() {
   clearTimeout(pollTimer); const g = ++gen;
