@@ -95,7 +95,7 @@
       <button id="fsBtn" type="button">Fullscreen</button>
       <button id="closeBtn" type="button" class="primary">Done</button>
     </div>
-    <p class="foot">Live positions from free ADS-B networks (adsb.fi, adsb.lol, airplanes.live), reached directly or through free public relays; routes and aircraft from adsbdb. Your location is rounded to about 1 km before it is sent. Only aircraft broadcasting ADS-B appear, and routes can occasionally be out of date. Keys: F fullscreen, S settings.</p>
+    <p class="foot">Live positions from free ADS-B networks (adsb.fi, adsb.lol, airplanes.live), relayed through this site; routes and aircraft from adsbdb. Your location is rounded to about 1 km before it is sent. Only aircraft broadcasting ADS-B appear, and routes can occasionally be out of date. Keys: F fullscreen, S settings.</p>
   </div>
 </div>
 
@@ -441,24 +441,14 @@ function nm(lat1, lon1, lat2, lon2) {
   const a = Math.sin(dLa / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLo / 2) ** 2;
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
-// The plane-position services (and OpenSky) don't allow direct browser calls, so the board also tries
-// several free public relays. All routes are probed at once; the first that works is remembered.
-const TARGETS = {
-  fi: (la, lo, r) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${r}`,
-  lol: (la, lo, r) => `https://api.adsb.lol/v2/point/${la}/${lo}/${r}`,
-};
-const RELAYS = {
-  codetabs: u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
-  allorigins: u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
-  'cors.lol': u => 'https://api.cors.lol/?url=' + encodeURIComponent(u),
-  corsproxy: u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
-};
+// The flight-data services don't let browsers read them directly, so when the board is hosted on
+// Netlify it asks its own site (/api/...), which relays the request. Direct calls stay as a fallback.
 const ROUTES = [
-  { id: 'airplanes.live', url: (la, lo, r) => `https://api.airplanes.live/v2/point/${la}/${lo}/${r}` },
-  { id: 'adsb.lol', url: TARGETS.lol },
-  { id: 'adsb.fi', url: TARGETS.fi },
+  { id: 'relay > adsb.fi', url: (la, lo, r) => `/api/fi/v2/lat/${la}/lon/${lo}/dist/${r}` },
+  { id: 'relay > adsb.lol', url: (la, lo, r) => `/api/lol/v2/point/${la}/${lo}/${r}` },
+  { id: 'relay > airplanes.live', url: (la, lo, r) => `/api/live/v2/point/${la}/${lo}/${r}` },
+  { id: 'adsb.fi direct', url: (la, lo, r) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${r}` },
 ];
-for (const rn in RELAYS) for (const tn of ['fi', 'lol']) ROUTES.push({ id: `${rn} > adsb.${tn}`, url: (la, lo, r) => RELAYS[rn](TARGETS[tn](la, lo, r)) });
 let activeSource = null, rr = 0;
 let working = store.get('routes', []).filter(id => ROUTES.some(r => r.id === id));
 const routeStatus = {}, cooldown = {};

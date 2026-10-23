@@ -1,0 +1,22 @@
+# Netlify hosts the flight board and relays the flight-data requests,
+# because the ADS-B services don't allow browsers to read them directly.
+[build]
+  publish = "flightboard"
+
+[[redirects]]
+  from = "/api/fi/*"
+  to = "https://opendata.adsb.fi/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/lol/*"
+  to = "https://api.adsb.lol/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/live/*"
+  to = "https://api.airplanes.live/:splat"
+  status = 200
+  force = true
