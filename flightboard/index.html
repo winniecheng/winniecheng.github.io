@@ -40,7 +40,8 @@
   .row.end { justify-content:flex-end; margin-top:16px; }
   section { padding:12px 0; border-top:1px solid var(--line); }
   section:first-of-type { border-top:0; padding-top:0; }
-  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; }
+  .grid select { width:100%; min-width:0; }
   .grid label { display:flex; flex-direction:column; gap:4px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
   input, select, button { font:inherit; color:var(--ink); background:#161616; border:1px solid #333; border-radius:8px; padding:9px 11px; }
   input { flex:1; min-width:0; }
@@ -83,8 +84,12 @@
       <label>LED color<select id="color">
         <option value="white">White</option><option value="amber">Amber</option><option value="green">Green</option><option value="blue">Ice blue</option>
       </select></label>
+      <label>Check every<select id="refresh">
+        <option value="15">15s</option><option value="30">30s (default)</option>
+        <option value="60">1 min</option><option value="120">2 min</option><option value="300">5 min</option>
+      </select></label>
       <label>Layout<select id="layout">
-        <option value="auto">Auto (fill screen)</option><option value="big">Large</option><option value="landscape">Wide strip</option><option value="portrait">Tall</option>
+        <option value="auto">Auto</option><option value="big">Large</option><option value="landscape">Wide strip</option><option value="portrait">Tall</option>
       </select></label>
     </section>
     <section>
@@ -95,7 +100,7 @@
       <button id="fsBtn" type="button">Fullscreen</button>
       <button id="closeBtn" type="button" class="primary">Done</button>
     </div>
-    <p class="foot">Live positions from free ADS-B networks (adsb.fi, adsb.lol, airplanes.live), relayed through this site; routes and aircraft from adsbdb. Your location is rounded to about 1 km before it is sent. Only aircraft broadcasting ADS-B appear, and routes can occasionally be out of date. Keys: F fullscreen, S settings.</p>
+    <p class="foot">Live positions from free ADS-B networks (adsb.fi, adsb.lol, airplanes.live), relayed through this site; routes and aircraft from adsbdb. Your location is rounded to about 1 km before it is sent. Only aircraft broadcasting ADS-B appear, and routes can occasionally be out of date. Between checks the board estimates each plane's position from its speed and heading. Faster checks use more of the free data and hosting allowance. Keys: F fullscreen, S settings.</p>
   </div>
 </div>
 
@@ -129,6 +134,7 @@ const settings = {
   units: params.get('units') || store.get('units', 'auto'),
   color: params.get('color') || store.get('color', 'white'),
   layout: params.get('layout') || store.get('layout', 'auto'),
+  refreshSec: Math.min(300, Math.max(15, +(params.get('refresh') || store.get('refreshSec', 30)) || 30)),
 };
 const DEMO = params.has('demo');
 const THEMES = { white: '#f6f2ea', amber: '#ffb21a', green: '#62ff86', blue: '#8fdcff' };
@@ -599,7 +605,7 @@ function startPolling() {
   const loop = async () => {
     if (g !== gen) return;
     if (!document.hidden) { try { await poll(g); } catch (e) { console.warn(e); } }
-    if (g === gen) pollTimer = setTimeout(loop, 30000);
+    if (g === gen) pollTimer = setTimeout(loop, settings.refreshSec * 1000);
   };
   if (state.mode === 'idle') setStatus('Scanning the sky');
   loop();
@@ -645,7 +651,7 @@ function syncPanel() {
     o.textContent = im ? `${v} mi` : `${Math.round(v * 1.609)} km`;
     if (v === settings.radiusMi) o.selected = true; sel.appendChild(o);
   }
-  $('units').value = settings.units; $('color').value = settings.color; $('layout').value = settings.layout;
+  $('refresh').value = String(settings.refreshSec); $('units').value = settings.units; $('color').value = settings.color; $('layout').value = settings.layout;
 }
 function openPanel() { syncPanel(); panel.hidden = false; }
 function closePanel() { panel.hidden = true; }
@@ -655,6 +661,7 @@ panel.addEventListener('click', e => { if (e.target === panel) closePanel(); });
 $('radius').onchange = e => { settings.radiusMi = +e.target.value; store.set('radiusMi', settings.radiusMi); state.mode = 'idle'; state.plane = null; startPolling(); };
 $('units').onchange = e => { settings.units = e.target.value; store.set('units', settings.units); syncPanel(); };
 $('color').onchange = e => { settings.color = e.target.value; store.set('color', settings.color); forcePaint = true; };
+$('refresh').onchange = e => { settings.refreshSec = +e.target.value; store.set('refreshSec', settings.refreshSec); startPolling(); };
 $('layout').onchange = e => { settings.layout = e.target.value; store.set('layout', settings.layout); resize(); };
 $('fsBtn').onclick = () => { closePanel(); toggleFS(); };
 $('useGps').onclick = () => {
