@@ -355,7 +355,7 @@ function linesOf(p) {
   if (r) { l2 = `${r.from.code}-${r.to.code}`; const fn = r.flightNo || p.callsign; if (fn) l2 += '  ' + fn; }
   else l2 = [...new Set([p.callsign, p.reg].filter(Boolean))].join('  ') || (p.hex || '').toUpperCase();
   const l3 = p.typeName || 'Aircraft type unknown';
-  const l4 = r ? r.from.name : (p.airlineName ? 'Route not available' : (p.ownerCountry || 'Private / unlisted'));
+  const l4 = r ? r.from.name : (p.airlineName || /^[A-Z]{3}\d/.test(p.callsign || '') ? 'Route not available' : (p.ownerCountry || 'Private / unlisted'));
   const l5 = r ? r.to.name : (p.reg && p.reg !== p.callsign ? 'Reg ' + p.reg : '');
   return [l1, l2, l3, l4, l5];
 }
@@ -459,8 +459,9 @@ const ROUTES = [
   { id: 'adsb.fi', url: TARGETS.fi },
 ];
 for (const rn in RELAYS) for (const tn of ['fi', 'lol']) ROUTES.push({ id: `${rn} > adsb.${tn}`, url: (la, lo, r) => RELAYS[rn](TARGETS[tn](la, lo, r)) });
-let activeSource = null, goodRoute = store.get('route', null);
-const routeStatus = {};
+let activeSource = null, rr = 0;
+let working = store.get('routes', []).filter(id => ROUTES.some(r => r.id === id));
+const routeStatus = {}, cooldown = {};
 async function tryRoute(rt, la, lo, qr) {
   try {
     const j = await fetchJSON(rt.url(la, lo, qr), 9000);
@@ -469,12 +470,13 @@ async function tryRoute(rt, la, lo, qr) {
     routeStatus[rt.id] = 'works'; return l;
   } catch (e) {
     routeStatus[rt.id] = e.status ? 'HTTP ' + e.status : e.name === 'AbortError' ? 'timed out' : (e.bad || e.name === 'SyntaxError') ? 'bad reply' : 'blocked';
+    cooldown[rt.id] = Date.now() + (e.status === 429 ? 180e3 : 60e3);
     throw e;
   }
 }
 function updateDataStatus() {
   const el = document.getElementById('dataStatus'); if (!el) return;
-  const lines = [activeSource ? 'Using: ' + activeSource.id : 'No working route yet'];
+  const lines = [activeSource ? 'Using: ' + activeSource.id + (working.length > 1 ? ` (rotating ${working.length} routes)` : '') : 'No working route yet'];
   for (const r of ROUTES) lines.push((routeStatus[r.id] === 'works' ? 'OK  ' : '--  ') + r.id + ': ' + (routeStatus[r.id] || 'not tried'));
   el.textContent = lines.join('\n');
 }
@@ -552,16 +554,25 @@ async function poll(g) {
   // Rounded to ~1 km: enough for a 10-mile search, and keeps your exact location private.
   const la = +loc.lat.toFixed(2), lo = +loc.lon.toFixed(2);
   let list = null;
-  const known = goodRoute && ROUTES.find(r => r.id === goodRoute);
-  if (known) { try { list = await tryRoute(known, la, lo, qr); activeSource = known; } catch (e) { goodRoute = null; } }
-  if (!list) {
-    const res = await Promise.all(ROUTES.map(rt => tryRoute(rt, la, lo, qr).then(l => ({ rt, l }), () => null)));
-    const hit = res.find(Boolean);
-    if (hit) { list = hit.l; activeSource = hit.rt; goodRoute = hit.rt.id; store.set('route', goodRoute); }
+  // Rotate through routes that have worked, so no single free relay gets hammered.
+  const ready = working.filter(id => (cooldown[id] || 0) <= Date.now());
+  for (let k = 0; k < ready.length && !list; k++) {
+    const rt = ROUTES.find(r => r.id === ready[(rr + k) % ready.length]);
+    try { list = await tryRoute(rt, la, lo, qr); activeSource = rt; } catch (e) {}
   }
+  rr++;
+  if (!list) {
+    // Probe every route that isn't cooling down; keep all that answer.
+    const cands = ROUTES.filter(r => (cooldown[r.id] || 0) <= Date.now());
+    const res = await Promise.all(cands.map(rt => tryRoute(rt, la, lo, qr).then(l => ({ rt, l }), () => null)));
+    const ok = res.filter(Boolean);
+    if (ok.length) { list = ok[0].l; activeSource = ok[0].rt; }
+    working = [...new Set([...ok.map(o => o.rt.id), ...working])].slice(0, 8);
+  } else if (!working.includes(activeSource.id)) working.unshift(activeSource.id);
+  store.set('routes', working);
   updateDataStatus();
   if (g !== gen) return;
-  if (!list) { activeSource = null; failCount++; if (state.mode === 'idle' || failCount >= 3) showIdle('Flight data unavailable - retrying'); return; }
+  if (!list) { activeSource = null; failCount++; if (state.mode === 'idle' || failCount >= 6) showIdle('Flight data unavailable - retrying'); return; }
   failCount = 0;
   const air = list.map(normalize).filter(p => p && p.alt !== 'ground').sort((a, b) => a.dist - b.dist);
   const inR = air.filter(p => p.dist <= rad);
@@ -590,7 +601,7 @@ function startPolling() {
   const loop = async () => {
     if (g !== gen) return;
     if (!document.hidden) { try { await poll(g); } catch (e) { console.warn(e); } }
-    if (g === gen) pollTimer = setTimeout(loop, !activeSource ? 15000 : slowSource() ? 75000 : 6000);
+    if (g === gen) pollTimer = setTimeout(loop, !activeSource ? 20000 : 8000);
   };
   if (state.mode === 'idle') setStatus('Scanning the sky');
   loop();
