@@ -515,9 +515,9 @@ const within = (pr, ms) => Promise.race([pr, new Promise(res => setTimeout(() =>
 async function enrich(p) {
   const cs = p.callsign, isAirline = /^[A-Z]{3}\d/.test(cs), pre = cs.slice(0, 3);
   const [route, ac, airline] = await Promise.all([
-    isAirline ? within(cached(routeCache, cs, () => getRoute(cs)), 4000) : null,
-    p.hex && p.hex[0] !== '~' ? within(cached(acCache, p.hex, () => getAircraft(p.hex)), 4000) : null,
-    isAirline ? within(cached(airlineCache, pre, () => getAirline(pre)), 4000) : null,
+    isAirline ? within(cached(routeCache, cs, () => getRoute(cs)), 7000) : null,
+    p.hex && p.hex[0] !== '~' ? within(cached(acCache, p.hex, () => getAircraft(p.hex)), 7000) : null,
+    isAirline ? within(cached(airlineCache, pre, () => getAirline(pre)), 7000) : null,
   ]);
   if (route && plausible(route, p)) p.route = route;
   const al = (route && route.airline) || airline;
@@ -575,7 +575,15 @@ async function poll(g) {
     else if (!target) { if (++missCount >= 1) showIdle('No flights overhead'); return; }
   }
   if (!target) { showIdle('No flights overhead'); return; }
-  if (cur && target.hex === cur.hex) return;
+  if (cur && target.hex === cur.hex) {
+    // If the airline/route lookup didn't come back in time, try again on later refreshes.
+    if (!cur.airlineName && /^[A-Z]{3}\d/.test(cur.callsign || '') && !switching && (cur.retries || 0) < 4) {
+      cur.retries = (cur.retries || 0) + 1; switching = true;
+      try { await enrich(cur); } finally { switching = false; }
+      if (cur.airlineName && state.plane === cur) { cur.lines = linesOf(cur); state.born = Date.now(); }
+    }
+    return;
+  }
   if (switching) return;
   switching = true;
   try { await enrich(target); } finally { switching = false; }
