@@ -377,6 +377,7 @@ function flightItems(now) {
 function idleSub(now) {
   const im = imperial();
   if (!loc) return 'Tap the gear to set a location';
+  if (state.status.startsWith('Flight data') && srcErrors.length) return srcErrors.join('  ');
   if (nearestOut && Math.floor(now / 6000) % 2) {
     const d = im ? Math.round(nearestOut.dist * 1.15078) + ' mi' : Math.round(nearestOut.dist * 1.852) + ' km';
     return `Nearest: ${nearestOut.callsign || nearestOut.reg || 'aircraft'} ${d} away`;
@@ -434,7 +435,7 @@ const SOURCES = [
   { name: 'adsb.fi', url: (la, lo, r) => `https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${r}` },
   { name: 'adsb.lol', url: (la, lo, r) => `https://api.adsb.lol/v2/point/${la}/${lo}/${r}` },
 ];
-let srcIdx = 0, failCount = 0, missCount = 0, switching = false;
+let srcIdx = 0, failCount = 0, missCount = 0, switching = false, srcErrors = [];
 function normalize(a) {
   const lat = a.lat != null ? a.lat : a.lastPosition && a.lastPosition.lat;
   const lon = a.lon != null ? a.lon : a.lastPosition && a.lastPosition.lon;
@@ -496,11 +497,15 @@ async function poll(g) {
   const rad = settings.radiusMi / 1.15078;
   const qr = Math.min(100, Math.max(15, Math.ceil(rad * 2.5)));
   const la = loc.lat.toFixed(4), lo = loc.lon.toFixed(4);
-  let data = null;
+  let data = null; const errs = [];
   for (let k = 0; k < SOURCES.length && !data; k++) {
     const i = (srcIdx + k) % SOURCES.length;
-    try { data = await fetchJSON(SOURCES[i].url(la, lo, qr), 8000); srcIdx = i; } catch (e) { console.warn(SOURCES[i].name, e.message || e); }
+    try { data = await fetchJSON(SOURCES[i].url(la, lo, qr), 8000); srcIdx = i; } catch (e) {
+      console.warn(SOURCES[i].name, e.message || e);
+      errs.push(SOURCES[i].name + ': ' + (e.status ? 'HTTP ' + e.status : e.name === 'AbortError' ? 'timed out' : 'blocked'));
+    }
   }
+  srcErrors = errs;
   if (g !== gen) return;
   if (!data) { failCount++; if (state.mode === 'idle' || failCount >= 3) showIdle('Flight data unavailable - retrying'); return; }
   failCount = 0;
