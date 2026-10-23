@@ -572,7 +572,7 @@ async function poll(g) {
   store.set('routes', working);
   updateDataStatus();
   if (g !== gen) return;
-  if (!list) { activeSource = null; failCount++; if (state.mode === 'idle' || failCount >= 6) showIdle('Flight data unavailable - retrying'); return; }
+  if (!list) { activeSource = null; failCount++; if (state.mode === 'idle' || failCount >= 3) showIdle('Flight data unavailable - retrying'); return; }
   failCount = 0;
   const air = list.map(normalize).filter(p => p && p.alt !== 'ground').sort((a, b) => a.dist - b.dist);
   const inR = air.filter(p => p.dist <= rad);
@@ -582,7 +582,7 @@ async function poll(g) {
   if (cur) {
     const still = inR.find(p => p.hex === cur.hex);
     if (still) { mergeLive(cur, still); missCount = 0; if (target.hex !== cur.hex && (Date.now() - state.born < 15000 || cur.dist - target.dist < 0.8)) target = cur; }
-    else if (!target) { if (++missCount >= (slowSource() ? 1 : 2)) showIdle('No flights overhead'); return; }
+    else if (!target) { if (++missCount >= 1) showIdle('No flights overhead'); return; }
   }
   if (!target) { showIdle('No flights overhead'); return; }
   if (cur && target.hex === cur.hex) return;
@@ -601,7 +601,7 @@ function startPolling() {
   const loop = async () => {
     if (g !== gen) return;
     if (!document.hidden) { try { await poll(g); } catch (e) { console.warn(e); } }
-    if (g === gen) pollTimer = setTimeout(loop, !activeSource ? 20000 : 8000);
+    if (g === gen) pollTimer = setTimeout(loop, 30000);
   };
   if (state.mode === 'idle') setStatus('Scanning the sky');
   loop();
